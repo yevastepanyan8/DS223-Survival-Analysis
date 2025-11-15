@@ -1,0 +1,284 @@
+---
+title: "Homework 3: Survival Analysis + CLV (R)"
+author: "Yeva Stepanyan"
+date: "2025-11-15"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Libraries
+```{r}
+library(survival)
+library(flexsurv)
+library(survminer)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+```
+
+### Loading the Dataset
+```{r}
+df <- read.csv("telco.csv", stringsAsFactors = FALSE)
+
+df$churn_flag <- ifelse(tolower(df$churn) == "yes", 1, 0)
+df$tenure <- as.numeric(df$tenure)
+```
+
+### Factoring the Categorical Variables
+```{r}
+df$gender <- factor(df$gender)
+df$ed <- factor(df$ed, levels = c("Did not complete high school","High school degree","Some college","College degree","Post-undergraduate degree"))
+df$custcat <- factor(df$custcat)
+df$region <- factor(df$region)
+```
+
+### Creating Survival Object
+```{r}
+surv_obj <- Surv(time = df$tenure, event = df$churn_flag)
+```
+
+### Kaplan-Meier
+```{r}
+km <- survfit(surv_obj ~ 1, data = df)
+km
+```
+
+
+```{r}
+ggsurvplot(km, data = df, 
+           xlab = "Tenure (months)", 
+           ylab = "Survival probability (not churned)", 
+           title = "KM - All customers")
+```
+
+### KM by Education
+```{r}
+if(nlevels(df$ed) > 1){
+  ggsurvplot(survfit(surv_obj ~ ed, data = df), data = df,
+             legend.title = "Education",
+             title = "Kaplan-Meier by education (small sample)")
+}
+```
+
+### AFT Parametric Models
+```{r}
+dists <- c("exponential","weibull","lognormal","loglogistic") 
+models <- list()
+for(dist in dists){
+  formula <- as.formula("surv_obj ~ gender + ed + income")
+  m <- try(survreg(formula, data = df, dist = dist), silent = TRUE)
+  if(inherits(m, "try-error")){
+    models[[dist]] <- NULL
+  } else {
+    models[[dist]] <- m
+  }
+}
+
+flex_wb <- try(flexsurvreg(formula = surv_obj ~ gender + ed + income, data = df, dist = "weibull"), silent = TRUE)
+if(!inherits(flex_wb, "try-error")) models[["flex_weibull"]] <- flex_wb
+```
+
+### Model Comparison
+```{r}
+aic_df <- data.frame(dist = character(0), AIC = numeric(0), stringsAsFactors = FALSE)
+for(nm in names(models)){
+  m <- models[[nm]]
+  if(!is.null(m)){
+    aic_df <- rbind(aic_df, data.frame(dist = nm, AIC = AIC(m)))
+  }
+}
+aic_df <- aic_df %>% arrange(AIC)
+aic_df
+
+```
+
+### Visualizing Survival Curves
+```{r}
+plot_df_all <- data.frame()
+time_grid <- seq(0, 80, by = 1)
+
+get_surv_probs <- function(fit_obj, newdata, times){
+  if(inherits(fit_obj, "flexsurvflex")){
+    s <- summary(fit_obj, newdata = newdata, t = times, type = "survival")
+    probs <- s[[1]]$est
+    return(probs)
+  } else if(inherits(fit_obj, "survreg")){
+    lp <- predict(fit_obj, newdata = newdata, type = "response")
+    distname <- fit_obj$dist
+    require(flexsurv)
+    fs <- try(flexsurvreg(formula = update(fit_obj$call$formula, . ~ gender + ed + income),
+                          data = eval(fit_obj$call$data),
+                          dist = distname), silent = TRUE)
+    if(!inherits(fs, "try-error")){
+      s <- summary(fs, newdata = newdata, t = times, type = "survival")
+      return(s[[1]]$est)
+    } else {
+      return(rep(NA, length(times)))
+    }
+  } else {
+    return(rep(NA, length(times)))
+  }
+}
+
+ref <- data.frame(gender = factor("Male", levels = levels(df$gender)),
+                  ed = factor("High school degree", levels = levels(df$ed)),
+                  income = median(df$income, na.rm = TRUE))
+
+for(nm in names(models)){
+  fit_obj <- models[[nm]]
+  if(is.null(fit_obj)) next
+  probs <- get_surv_probs(fit_obj, newdata = ref, times = time_grid)
+  plot_df_all <- bind_rows(plot_df_all,
+                           data.frame(time = time_grid, surv = probs, model = nm))
+}
+
+ggplot(plot_df_all, aes(x = time, y = surv, color = model)) +
+  geom_line(size=1) +
+  labs(title = "Fitted survival curves (reference customer)", x = "Time (months)", y = "Survival prob") +
+  theme_minimal()
+```
+
+### Selecting the Final Model
+```{r}
+
+if(nrow(aic_df) > 0){
+  best <- aic_df$dist[1]
+  cat("Selected final model by AIC:", best, "\n")
+} else {
+  best <- NA
+  cat("No fitted models available.\n")
+}
+
+final_model <- NULL
+if(!is.na(best) && best %in% names(models)) final_model <- models[[best]]
+#final_model <- models[["flex_weibull"]]
+```
+
+### Signifivant Features
+```{r}
+if(!is.null(final_model) && inherits(final_model, "survreg")){
+  s <- summary(final_model)
+  coefs <- s$table
+  sig_vars <- rownames(coefs)[which(coefs[,"p"] < 0.10)]
+  cat("Significant parameter rows (p<0.10):\n")
+  print(sig_vars)
+}
+```
+
+### CLV Using the Final Model
+```{r}
+discount_annual <- 0.12
+discount_month <- discount_annual / 12
+T_max <- 60
+acq_cost <- 0
+
+get_S_for_customer <- function(customer_row, times){
+  newd <- customer_row %>% select(gender, ed, income)
+  newd$gender <- factor(newd$gender, levels = levels(df$gender))
+  newd$ed <- factor(newd$ed, levels = levels(df$ed))
+  
+  if(inherits(final_model, "flexsurvreg")) {
+    s <- summary(final_model, newdata = newd, t = times, type = "survival")
+    return(s[[1]]$est)
+  } else if(inherits(final_model, "survreg")) {
+    lp <- predict(final_model, newdata = newd, type = "quantile", p = 0.5)
+    fs <- flexsurvreg(formula = surv_obj ~ gender + ed + income, data = df, dist = final_model$dist)
+    s <- summary(fs, newdata = newd, t = times, type = "survival")
+    return(s[[1]]$est)
+  } else {
+    return(rep(NA, length(times)))
+  }
+}
+
+```
+
+### CLV for Each Customer
+```{r}
+clv_list <- vector("numeric", nrow(df))
+times <- 1:T_max
+for(i in seq_len(nrow(df))){
+  cust <- df[i,]
+  Svec <- get_S_for_customer(cust, times)
+  monthly_margin <- 0.10 * (cust$income) / 12
+  disc_f <- (1 + discount_month) ^ times
+  clv_val <- sum(monthly_margin * Svec / disc_f, na.rm = TRUE) - acq_cost
+  clv_list[i] <- clv_val
+}
+df$CLV_est <- clv_list
+
+df %>% select(ID, region, tenure, income, ed, gender, churn_flag, CLV_est) %>%
+  arrange(desc(CLV_est)) %>%
+  head(10)
+```
+
+### Outputs
+**Model AICs**
+```{r}
+aic_df
+```
+
+**Sample CLV**
+```{r}
+head(df %>% select(ID, CLV_est), 5)
+```
+
+```{r}
+summary(df$tenure)
+```
+
+Histogram of CLV
+```{r}
+p1 <- ggplot(df, aes(x = CLV_est)) +
+  geom_histogram(binwidth = 5, fill = "steelblue", color = "black") +
+  labs(title = "Distribution of Customer Lifetime Value",
+       x = "CLV (USD)", y = "Count") +
+  theme_minimal()
+p1
+```
+
+CLV by education
+```{r}
+p2 <- ggplot(df, aes(x = ed, y = CLV_est, fill = ed)) +
+  geom_boxplot() +
+  labs(title = "CLV by Education Level",
+       x = "Education", y = "CLV (USD)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+p2
+```
+
+CLV vs Income by gender
+```{r}
+p3 <- ggplot(df, aes(x = income, y = CLV_est, color = gender)) +
+  geom_point(alpha = 0.6) +
+  labs(title = "CLV vs Income by Gender",
+       x = "Income", y = "CLV (USD)") +
+  theme_minimal()
+p3
+```
+
+Average CLV by customer segment
+```{r}
+avg_clv <- df %>%
+  group_by(custcat) %>%
+  summarise(avg_CLV = mean(CLV_est, na.rm = TRUE))
+
+p4 <- ggplot(avg_clv, aes(x = custcat, y = avg_CLV, fill = custcat)) +
+  geom_col() +
+  labs(title = "Average CLV by Customer Segment",
+       x = "Customer Segment", y = "Average CLV (USD)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+p4
+```
+
+```{r}
+ggsave("CLV_histogram.png", plot = p1, width = 6, height = 4, dpi = 300)
+ggsave("CLV_by_education.png", plot = p2, width = 6, height = 4, dpi = 300)
+ggsave("CLV_vs_income.png", plot = p3, width = 6, height = 4, dpi = 300)
+ggsave("Average_CLV_by_segment.png", plot = p4, width = 6, height = 4, dpi = 300)
+```
+

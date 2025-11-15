@@ -1,0 +1,16 @@
+---
+title: "Report"
+author: "Yeva Stepanyan"
+date: "2025-11-15"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Report 
+
+Based on the survival analysis, several factors significantly influence subscriber churn. The coefficients indicate that higher engagement metrics (e.g., frequent usage, longer session times) and loyalty indicators (e.g., tenure, subscription type) are associated with a lower risk of churn, while low engagement and short subscription history increase the hazard of leaving. Demographic factors such as age or plan type may also have measurable effects, with certain segments showing higher retention probabilities over time.
+
+The most valuable segments are defined as those with both high lifetime value (CLV) and a moderate-to-high risk of churn—essentially subscribers who, if retained, contribute the most to revenue. By examining survival probabilities, we estimate the number of at-risk subscribers within the next year and calculate the expected CLV lost if they churn. Assuming the data represents the full population, an annual retention budget should at minimum cover the expected revenue loss from these at-risk subscribers. Additional strategies to improve retention could include personalized incentives, targeted engagement campaigns for high-risk but high-value subscribers, and proactive monitoring of early warning signals in usage patterns to intervene before churn occurs.
